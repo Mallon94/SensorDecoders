@@ -10,8 +10,12 @@ function Decoder(bytes, port) {
 }
 
 gpio_chns = [0x03, 0x04];
+gpio_alarm_chns = [0x83, 0x84];
+gpio_change_alarm_chns = [0x93, 0x94];
+
 adc_chns = [0x05, 0x06];
 adc_alarm_chns = [0x85, 0x86];
+adc_change_alarm_chns = [0x95, 0x96];
 
 function milesight(bytes) {
     var decoded = {};
@@ -37,6 +41,21 @@ function milesight(bytes) {
             decoded[gpio_channel_name] = readUInt32LE(bytes.slice(i, i + 4));
             i += 4;
         }
+        // GPIO Alarm (GPIO as PULSE COUNTER)
+        else if (includes(gpio_alarm_chns, channel_id) && channel_type === 0xc8) {
+            var gpio_channel_name = "counter_" + (channel_id - gpio_alarm_chns[0] + 1);
+            decoded[gpio_channel_name] = readUInt32LE(bytes.slice(i, i + 4));
+            decoded[gpio_channel_name + "_alarm"] = readAlarm(bytes[i + 4]);
+            i += 5;
+        }
+        // COUNTER CHANGE ALARM (GPIO as PULSE COUNTER)
+        else if (includes(gpio_change_alarm_chns, channel_id) && channel_type === 0xc8) {
+            var gpio_channel_name = "counter_" + (channel_id - gpio_change_alarm_chns[0] + 1);
+            decoded[gpio_channel_name] = readUInt32LE(bytes.slice(i, i + 4));
+            decoded[gpio_channel_name + "_change"] = readUInt32LE(bytes.slice(i + 4, i + 8));
+            decoded[gpio_channel_name + "_alarm"] = readAlarm(bytes[i + 8]);
+            i += 9;
+        }
         // ADC (UC50x v2)
         // firmware version 1.10 and below and UC50x V1, change 1000 to 100.
         else if (includes(adc_chns, channel_id) && channel_type === 0x02) {
@@ -56,6 +75,27 @@ function milesight(bytes) {
             decoded[adc_channel_name + "_avg"] = readFloat16LE(bytes.slice(i + 6, i + 8));
             i += 8;
         }
+        // ADC ALARM (UC50x v3)
+        else if (includes(adc_alarm_chns, channel_id) && channel_type === 0xe2) {
+            var adc_channel_name = "adc_" + (channel_id - adc_alarm_chns[0] + 1);
+            decoded[adc_channel_name] = readFloat16LE(bytes.slice(i, i + 2));
+            decoded[adc_channel_name + "_min"] = readFloat16LE(bytes.slice(i + 2, i + 4));
+            decoded[adc_channel_name + "_max"] = readFloat16LE(bytes.slice(i + 4, i + 6));
+            decoded[adc_channel_name + "_avg"] = readFloat16LE(bytes.slice(i + 6, i + 8));
+            decoded[adc_channel_name + "_alarm"] = readAlarm(bytes[i + 8]);
+            i += 9;
+        }
+        // ADC CHANGE ALARM (UC50x v3)
+        else if (includes(adc_change_alarm_chns, channel_id) && channel_type === 0xe2) {
+            var adc_channel_name = "adc_" + (channel_id - adc_change_alarm_chns[0] + 1);
+            decoded[adc_channel_name] = readFloat16LE(bytes.slice(i, i + 2));
+            decoded[adc_channel_name + "_min"] = readFloat16LE(bytes.slice(i + 2, i + 4));
+            decoded[adc_channel_name + "_max"] = readFloat16LE(bytes.slice(i + 4, i + 6));
+            decoded[adc_channel_name + "_avg"] = readFloat16LE(bytes.slice(i + 6, i + 8));
+            decoded[adc_channel_name + "_change"] = readFloatLE(bytes.slice(i + 8, i + 12));
+            decoded[adc_channel_name + "_alarm"] = readAlarm(bytes[i + 12]);
+            i += 13;
+        }
         // SDI-12
         else if (channel_id === 0x08 && channel_type === 0xdb) {
             var name = "sdi12_" + (bytes[i++] + 1);
@@ -63,12 +103,12 @@ function milesight(bytes) {
             i += 36;
         }
         // MODBUS
-        else if ((channel_id === 0xff || channel_id === 0x80) && channel_type === 0x0e) {
+        else if ((channel_id === 0xff || channel_id === 0x80 || channel_id === 0x90) && channel_type === 0x0e) {
             var modbus_chn_id = bytes[i++] - 6;
             var package_type = bytes[i++];
             var data_type = package_type & 0x07; // 0x07 = 0b00000111
             var date_length = package_type >> 3;
-            var chn = "modbus_chn_" + modbus_chn_id;
+            var chn = "chn_" + modbus_chn_id;
             switch (data_type) {
                 case 0:
                     decoded[chn] = bytes[i] ? "on" : "off";
@@ -95,6 +135,16 @@ function milesight(bytes) {
                     break;
             }
 
+            if (channel_id === 0x90) {
+                if (data_type === 5 || data_type === 7) {
+                    decoded[chn + "_change"] = readFloatLE(bytes.slice(i, i + 4));
+                } else {
+                    decoded[chn + "_change"] = readUInt32LE(bytes.slice(i, i + 4));
+                }
+                i += 4;
+                decoded[chn + "_alarm"] = readAlarm(bytes[i++]);
+            }
+
             if (channel_id === 0x80) {
                 decoded[chn + "_alarm"] = readAlarm(bytes[i++]);
             }
@@ -105,17 +155,6 @@ function milesight(bytes) {
             var channel_name = "modbus_chn_" + modbus_error_chn_id;
             decoded[channel_name + "_alarm"] = "read error";
             i += 1;
-        }
-        // ADC alert (UC50x v3)
-        else if (includes(adc_alarm_chns, channel_id) && channel_type === 0xe2) {
-            var adc_channel_name = "adc_" + (channel_id - adc_alarm_chns[0] + 1);
-            decoded[adc_channel_name] = readFloat16LE(bytes.slice(i, i + 2));
-            decoded[adc_channel_name + "_min"] = readFloat16LE(bytes.slice(i + 2, i + 4));
-            decoded[adc_channel_name + "_max"] = readFloat16LE(bytes.slice(i + 4, i + 6));
-            decoded[adc_channel_name + "_avg"] = readFloat16LE(bytes.slice(i + 6, i + 8));
-            i += 8;
-
-            decoded[adc_channel_name + "_alarm"] = readAlarm(bytes[i++]);
         }
         // HISTORY DATA (GPIO / ADC)
         else if (channel_id === 0x20 && channel_type === 0xdc) {
